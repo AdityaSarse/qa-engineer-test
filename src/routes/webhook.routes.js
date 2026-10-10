@@ -18,30 +18,40 @@ router.post('/payment-status', (req, res) => {
     const signature = req.headers['x-webhook-signature'];
     const { payment_id, status, event_id } = req.body;
 
-    // BUG D: No signature verification
-    // Real systems MUST verify webhook signatures to prevent spoofing
-    // Missing validation below:
-    
-    // const expectedSignature = crypto
-    //   .createHmac('sha256', WEBHOOK_SECRET)
-    //   .update(JSON.stringify(req.body))
-    //   .digest('hex');
-    // 
-    // if (signature !== expectedSignature) {
-    //   return res.status(401).json({ error: 'Invalid signature' });
-    // }
+    // FIX D: Verify webhook signature using HMAC-SHA256
+    // Prevents spoofed webhook calls from untrusted sources
+    if (!signature) {
+      return res.status(401).json({ error: 'Missing webhook signature' });
+    }
+
+    const expectedSignature = crypto
+      .createHmac('sha256', WEBHOOK_SECRET)
+      .update(JSON.stringify(req.body))
+      .digest('hex');
+
+    // Use timing-safe comparison to prevent timing attacks
+    try {
+      const sigBuffer = Buffer.from(signature, 'hex');
+      const expectedBuffer = Buffer.from(expectedSignature, 'hex');
+      if (sigBuffer.length !== expectedBuffer.length || !crypto.timingSafeEqual(sigBuffer, expectedBuffer)) {
+        return res.status(401).json({ error: 'Invalid signature' });
+      }
+    } catch (e) {
+      return res.status(401).json({ error: 'Invalid signature' });
+    }
 
     if (!payment_id || !status) {
       return res.status(400).json({ error: 'payment_id and status required' });
     }
 
-    // BUG E: No idempotency check
-    // Webhooks can be delivered multiple times - must be idempotent
-    // Missing check below:
-    
-    // if (db.processed_webhooks.includes(event_id)) {
-    //   return res.status(200).json({ message: 'Already processed' });
-    // }
+    // FIX E: Idempotency check — reject duplicate webhook deliveries
+    if (!event_id) {
+      return res.status(400).json({ error: 'event_id required' });
+    }
+
+    if (db.processed_webhooks.includes(event_id)) {
+      return res.status(200).json({ message: 'Already processed' });
+    }
 
     const payment = getPaymentById(payment_id);
     if (!payment) {
@@ -52,8 +62,8 @@ router.post('/payment-status', (req, res) => {
     payment.status = status;
     payment.webhook_received_at = new Date();
 
-    // Mark webhook as processed (if idempotency was implemented)
-    // db.processed_webhooks.push(event_id);
+    // Mark webhook as processed for idempotency
+    db.processed_webhooks.push(event_id);
 
     res.status(200).json({
       success: true,
